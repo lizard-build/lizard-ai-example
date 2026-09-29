@@ -1,0 +1,124 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
+import { createServer } from 'node:http';
+import pg from 'pg';
+import { validateInitData, defaults, validateSettings, modelCatalog } from '../src/settings.mjs';
+import { miniAppHandler } from '../src/miniapp.mjs';
+import { Control } from '../src/control.mjs';
+import { Store } from '../src/store.mjs';
+import { Bot } from '../src/bot.mjs';
+import { TenantWorker } from '../src/worker.mjs';
+const token='123:test-token';
+function sign(id,age=0) {
+  const data=new URLSearchParams({auth_date:String(Math.floor(Date.now()/1000)-age),user:JSON.stringify({id,first_name:'Test'}),signature:'signed-field'});
+  const key=createHmac('sha256','WebAppData').update(token).digest();
+  data.set('hash',createHmac('sha256',key).update([...data].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${k}=${v}`).join('\n')).digest('hex'));
+  return data.toString();
+}
+test('Mini App identity verifies signature, age and duplicate fields',()=>{
+  assert.equal(validateInitData(sign(123),token).id,123);
+  for(const raw of [sign(123).replace('Test','Fake'),sign(123,3601),sign(123,-50),sign(123)+'&user=%7B%22id%22:999%7D',sign(-1),'']) assert.throws(()=>validateInitData(raw,token));
+  assert.throws(()=>validateInitData(sign(123),'wrong-token'));
+});
+test('settings constrain file size, model capabilities and idle resource budget',()=>{
+  const cfg={idleMs:30*60000}, models=modelCatalog([{model:'test-model',displayName:'Test',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]}]);
+  assert.deepEqual(validateSettings(defaults(cfg),cfg,models),defaults(cfg));
+  assert.equal(defaults(cfg).language,'auto');
+  assert.equal(validateSettings({...defaults(cfg),model:'test-model',effort:'high'},cfg,models).effort,'high');
+  for(const patch of [{agentsMd:'🦎'.repeat(9000)},{agentsMd:'\0'},{model:'unknown'},{effort:'high'},{model:'test-model',effort:'xhigh'},{idleMinutes:31},{idleMinutes:0},{user_id:123},{language:'script'},{streaming:1}]) assert.throws(()=>validateSettings({...defaults(cfg),...patch},cfg,models));
+});
+test('settings API isolates tenants, rejects blocked users and stale edits, and never wakes compute',{skip:!process.env.TEST_DATABASE_URL},async t=>{
+  // Isolate control tables from the multi-user suite running in another process.
+  const admin=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL});
+  await admin.query('CREATE DATABASE settings_test');t.after(()=>admin.end());
+  const url=new URL(process.env.TEST_DATABASE_URL);url.pathname='/settings_test';
+  const cfg={database:url.toString(),token,owner:771001,project:'test',volume:'owner-volume',idleMs:1800000,miniAppUrl:'https://settings.example/settings',maxUsers:100};
+  const control=new Control(cfg);await control.start();t.after(()=>control.close());
+  await control.query("INSERT INTO control.tenants(user_id,admission,schema_name,volume_name) VALUES(771002,'approved','tenant_771002','v2'),(771003,'blocked','tenant_771003','v3')");
+  await control.gatewayLock();
+  const successor=new Control(cfg);await successor.start();t.after(()=>successor.close());
+  setTimeout(()=>{void control.gateway.query('SELECT pg_advisory_unlock(220927,2)');},50);
+  await successor.gatewayLock({waitMs:2000});
+  const handler=miniAppHandler(cfg,control);
+  const server=createServer(async(req,res)=>{if(!await handler(req,res)){res.writeHead(404);res.end();}});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const request=(id,method='GET',body,headers={})=>fetch(base+'/api/settings',{method,headers:{Authorization:`tma ${sign(id)}`,...(body?{'Content-Type':'application/json'}:{}),...headers},...(body?{body:JSON.stringify(body)}:{})});
+  assert.equal((await fetch(base+'/api/settings')).status,401);
+  assert.equal((await request(771003)).status,403);
+  assert.equal((await request(999999)).status,403);
+  const first=await (await request(771001)).json();assert.equal(first.version,0);
+  const settings={...first.settings,agentsMd:'# Private A',language:'ru',idleMinutes:5,streaming:false};
+  assert.equal((await request(771001,'PUT',{version:0,settings},{Origin:'https://attacker.example'})).status,403);
+  const saved=await (await request(771001,'PUT',{version:0,settings,user_id:771002})).json();
+  assert.equal(saved.version,1);assert.equal(saved.settings.agentsMd,'# Private A');
+  assert.equal((await (await request(771002)).json()).settings.agentsMd,'');
+  assert.equal((await request(771001,'PUT',{version:0,settings})).status,409);
+  assert.equal((await request(771001,'PUT',{version:1,settings:{...settings,idleMinutes:100}})).status,400);
+  assert.equal((await control.tenant(771001)).lifecycle,'sleeping');assert.equal((await control.tenant(771001)).has_work,false);
+  assert.equal((await control.query('SELECT count(*) FROM control.inbox')).rows[0].count,'0');
+  // /settings opens a real Web App button, with no worker allocation.
+  await control.receive([{update_id:50,message:{from:{id:771001},chat:{id:771001,type:'private'},text:'/settings',message_thread_id:55}}]);
+  const message=(await control.query("SELECT * FROM control.outbox WHERE dedup_key='gateway:50'")).rows[0];
+  assert.equal(message.extra.reply_markup.inline_keyboard[0][0].web_app.url,cfg.miniAppUrl);assert.equal(Number(message.topic),55);
+  assert.equal((await control.query('SELECT count(*) FROM control.inbox')).rows[0].count,'0');
+  assert.equal((await fetch(base+'/settings')).status,200);assert.equal((await fetch(base+'/settings/../../src/main.mjs')).status,404);
+  // Apply personal defaults to the next turn, keeping explicit per-topic models.
+  const store=new Store(cfg.database);await store.start();t.after(()=>store.close());
+  const calls=[],runtime={generation:'g',rpc:async(m,p)=>{calls.push({m,p});return m==='turn/start'?{turn:{id:'turn'}}:{};}};
+  const bot=new Bot({...cfg,chat:cfg.owner},store,{},runtime);bot.settings={...settings,model:'test-model',effort:'high'};
+  await store.query("INSERT INTO sessions(topic,title,cwd,thread_id) VALUES(55,'Test','/workspace/sessions/55','thread')");
+  const dataRequest=id=>fetch(base+'/api/data?user_id=771001',{headers:{Authorization:`tma ${sign(id)}`}});
+  assert.equal((await fetch(base+'/api/data')).status,401);
+  assert.equal((await dataRequest(771003)).status,403);
+  const privateData=await (await dataRequest(771001)).json();
+  assert.equal(privateData.total,1);assert.equal(privateData.sessions[0].title,'Test');
+  assert.equal(privateData.instructionBytes,Buffer.byteLength(settings.agentsMd));
+  for(const secret of ['thread_id','cwd','schema_name','volume_name','user_id','sandbox_id','agentsMd']) assert.equal(JSON.stringify(privateData).includes(`"${secret}"`),false);
+  assert.equal((await (await dataRequest(771002)).json()).total,0,'uninitialized tenant does not inherit owner history');
+  const secondStore=new Store(cfg.database,'tenant_771002');await secondStore.start();t.after(()=>secondStore.close());
+  await secondStore.query("INSERT INTO sessions(topic,title,cwd,archived) SELECT n,'Other private chat '||n,'/private/path',true FROM generate_series(1,45) AS n");
+  const secondData=await (await dataRequest(771002)).json();
+  assert.equal(secondData.total,45);assert.equal(secondData.archived,45);assert.equal(secondData.sessions.length,40);
+  assert.equal(secondData.sessions.every(s=>s.title.startsWith('Other private chat')),true);
+  assert.equal((await control.tenant(771002)).has_work,false,'reading data never wakes compute');
+  assert.equal((await (await dataRequest(771001)).json()).total,1);
+  await store.receive([{update_id:60}]);await store.query("INSERT INTO prompts(update_id,topic,text) VALUES(60,55,'task')");
+  await bot.startPrompts();
+  assert.match(calls.find(c=>c.m==='thread/resume').p.developerInstructions,/# Private A/);
+  assert.match(calls.find(c=>c.m==='thread/resume').p.developerInstructions,/Use Russian/);
+  assert.equal(calls.find(c=>c.m==='turn/start').p.model,'test-model');assert.equal(calls.find(c=>c.m==='turn/start').p.effort,'high');
+  assert.equal(calls.find(c=>c.m==='turn/start').p.approvalPolicy,'never');
+  // The same worker notices a saved version and invalidates its loaded instructions.
+  class FakeRuntime {async saveAgents(text){this.text=text;}}
+  const worker=new TenantWorker(cfg,control,{},await control.tenant(771002),FakeRuntime);t.after(()=>worker.store.close());
+  worker.bot.loadedThreads.set('thread','g');worker.applySettings({...await control.tenant(771002),settings,settings_version:2});
+  assert.equal(worker.bot.loadedThreads.size,0);assert.equal(worker.cfg.idleMs,300000);
+  worker.ready=true;worker.runtime.generation='g';await worker.syncSettings();assert.equal(worker.runtime.text,'# Private A');
+  const appsRequest=(user,method='GET')=>fetch(base+(method==='POST'?'/api/apps/refresh':'/api/apps'),{method,headers:{Authorization:`tma ${sign(user)}`}});
+  await control.query('UPDATE control.tenants SET apps=$2 WHERE user_id=$1',[771001,JSON.stringify({state:'connected',items:[{key:'private-project',name:'My shop',description:'Handmade gifts',url:'https://shop.example.com',status:'ready'}]})]);
+  const gallery=await (await appsRequest(771001)).json();assert.equal(gallery.items[0].name,'My shop');assert.equal(gallery.items[0].key,undefined);
+  assert.equal((await (await appsRequest(771002)).json()).items.length,0);
+  assert.equal((await control.tenant(771002)).apps_request_seq,0,'viewing apps does not start a refresh');
+  assert.equal((await appsRequest(771002,'POST')).status,202);await appsRequest(771002,'POST');
+  assert.equal((await control.tenant(771002)).apps_request_seq,1,'refresh is coalesced');
+  assert.equal((await control.tenant(771002)).has_work,true);
+  assert.equal((await appsRequest(771003,'POST')).status,403);
+  worker.runtime.collectApps=async()=>({state:'connected',items:[{key:'b',name:'B',url:'https://b.example.com',status:'ready'}]});
+  worker.refreshApps(await control.tenant(771002));await worker.appsRefresh;
+  assert.equal((await control.tenant(771002)).apps_done_seq,1);
+  assert.equal((await (await appsRequest(771002)).json()).items[0].name,'B');
+  assert.equal((await (await appsRequest(771001)).json()).items[0].name,'My shop','worker cannot overwrite another user’s gallery');
+  await control.query("UPDATE control.tenants SET admission='blocked' WHERE user_id=771001");
+  assert.equal((await request(771001,'PUT',{version:1,settings})).status,403);
+});
+test('model defaults clear sticky turn overrides, while topic choices keep their own effort',()=>{
+  const bot=new Bot({},null,null,null);
+  bot.models=modelCatalog([{model:'default-model',isDefault:true,defaultReasoningEffort:'medium'},{model:'other-model',defaultReasoningEffort:'low'}]);
+  bot.settings={...defaults(),model:'other-model',effort:'high'};
+  assert.deepEqual(bot.turnOptions(null),{model:'other-model',effort:'high'});
+  bot.settings={...defaults()};
+  assert.deepEqual(bot.turnOptions(null),{model:'default-model',effort:'medium'});
+  assert.deepEqual(bot.turnOptions('other-model'),{model:'other-model',effort:'low'});
+});

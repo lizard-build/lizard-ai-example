@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="color-scheme" content="dark"><title>Lizard AI</title>
+<link rel="stylesheet" href="/settings/style.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script><script defer src="/settings/app.js"></script>
+</head>
+<body>
+<div class="shell">
+<header class="app-header"><span class="brand-mark" aria-hidden="true">L</span><span class="brand">Lizard AI</span><span id="space-label" class="private-label">Your space</span></header>
+<main id="content" tabindex="-1">
+<div id="notice" role="status" aria-live="polite">Opening your space…</div>
+<p id="group-context" class="hint callout" hidden></p>
+<form id="settings" hidden>
+<section id="apps" class="panel" role="tabpanel" aria-labelledby="tab-apps" tabindex="0">
+<div class="page-heading"><div><h1 id="apps-title">Your apps</h1><p id="apps-subtitle" class="hint">Made by you. Ready to use.</p></div><button type="button" id="refresh-apps" class="secondary">Refresh</button></div>
+<p id="apps-note" class="hint callout" role="status" aria-live="polite">Loading your apps…</p>
+<div id="app-list"></div>
+<div id="apps-empty" class="empty-state" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><path d="M17.5 14v7M14 17.5h7"/></svg><h2>Your next idea starts in chat</h2><p class="hint">Ask Lizard AI to build and publish an app. It will appear here when it is ready.</p><button type="button" class="primary back-to-chat">Back to chat</button></div>
+<p id="apps-updated" class="hint footnote"></p>
+</section>
+<section id="preferences" class="panel" role="tabpanel" aria-labelledby="tab-preferences" tabindex="0" hidden>
+<div class="page-heading"><div><h1>Settings</h1><p id="settings-subtitle" class="hint">Make your assistant work your way.</p></div></div>
+<h2 class="group-title">Replies</h2>
+<div class="card rows">
+<label class="row" for="language"><span>Reply language<small>Match the language of your message.</small></span><select id="language"><option value="auto">Match</option><option value="en">English</option><option value="ru">Russian</option></select></label>
+<label class="row" for="model"><span>Model<small>A chat’s /model choice takes priority.</small></span><select id="model"><option value="">Codex default</option></select></label>
+<p id="model-hint" class="hint inline-hint"></p>
+<label class="row" for="effort"><span>Thinking time<small>More thinking can take longer.</small></span><select id="effort"><option value="">Model default</option></select></label>
+<label class="row" for="streaming"><span>Live replies<small>See answers as they are written.</small></span><input type="checkbox" role="switch" class="switch" id="streaming"></label>
+</div>
+<h2 id="instructions-title" class="group-title">Personal instructions</h2>
+<div class="card instructions-card">
+<p class="hint" id="agents-help">Tell your assistant what matters to you: how to write, how to work, and what to remember across chats.</p>
+<div class="section-heading"><label for="agentsMd">AGENTS.md</label><span id="bytes" class="hint">0 / 32 KB</span></div>
+<textarea id="agentsMd" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="agents-help" placeholder="# How I work&#10;&#10;- Keep replies concise.&#10;- Explain changes in plain English.&#10;- Run relevant tests before committing."></textarea>
+<div class="file-footer"><span id="instructions-scope" class="hint">Applies to all your chats</span><label class="file-import secondary">Import .md<input type="file" id="import" accept=".md,.txt,text/plain,text/markdown"></label></div>
+</div>
+<h2 class="group-title">Workspace</h2>
+<div class="card rows">
+<label class="row" for="idleMinutes"><span>Pause when idle<small>Your files and sign-ins stay saved.</small></span><select id="idleMinutes"></select></label>
+<div class="row"><span>Access<small>Work without approval prompts.</small></span><span class="badge">Full access</span></div>
+<details class="included"><summary>Included tools</summary><p class="hint">Ready in every session.</p><div class="tool-list"><span>Lizard CLI</span><span>GitHub CLI</span><span>agent-browser</span><span>Lizard Skill</span></div></details>
+</div>
+<p class="hint footnote">Changes apply to your next task. The interface stays in English.</p>
+</section>
+<section id="data" class="panel" role="tabpanel" aria-labelledby="tab-data" tabindex="0" hidden>
+<div class="page-heading"><div><h1 id="data-title">Your data</h1><p id="data-subtitle" class="hint">What stays with you between chats.</p></div><button type="button" id="refresh-data" class="secondary">Refresh</button></div>
+<p id="data-note" class="hint callout" role="status" aria-live="polite">Loading your data…</p>
+<div class="card rows">
+<div class="row"><span>Workspace<small>Wakes when you send a task.</small></span><span id="state" class="badge neutral">Loading</span></div>
+<div class="row"><span>Files &amp; sign-ins<small>Kept when your workspace pauses.</small></span><span class="badge">Retained</span></div>
+<div class="row"><span><span id="data-instructions-title">Personal instructions</span><small>Saved AGENTS.md.</small></span><span id="saved-instructions" class="hint">—</span></div>
+</div>
+<div class="section-heading group-title"><h2>Saved chats</h2><span id="session-count" class="hint"></span></div>
+<p id="sessions-help" class="hint">Continue a chat in Telegram. Use /sessions in the bot to find it.</p>
+<div id="session-list" class="card"></div>
+<p id="sessions-empty" class="hint" hidden>No saved chats yet. Start one with /new in the bot.</p>
+<p id="sessions-note" class="hint footnote"></p>
+<h2 class="group-title">A copy of your instructions</h2>
+<div class="card copy-card"><p class="hint">Keep a copy of your saved rules, or use them in another workspace.</p><button type="button" id="copy-instructions" class="secondary" disabled>Copy AGENTS.md</button><textarea id="copy-fallback" aria-label="Saved instructions to copy" readonly hidden></textarea><p id="copy-note" class="hint" role="status" aria-live="polite"></p></div>
+<p class="hint footnote" id="member-since"></p>
+</section>
+</form>
+<button id="reload" class="secondary" type="button" hidden>Reload settings</button>
+</main>
+<div id="save-bar" hidden><p id="save-note">Applies to your next task</p><button type="submit" form="settings" class="primary" id="save" disabled>Save changes</button></div>
+<nav class="tabbar" role="tablist" aria-label="Your space">
+<button type="button" id="tab-apps" class="tab active" role="tab" data-panel="apps" aria-controls="apps" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg><span>Apps</span></button>
+<button type="button" id="tab-preferences" class="tab" role="tab" data-panel="preferences" aria-controls="preferences" aria-selected="false" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span>Settings</span><span id="dirty-dot" class="dirty-dot" aria-label="Unsaved changes" hidden></span></button>
+<button type="button" id="tab-data" class="tab" role="tab" data-panel="data" aria-controls="data" aria-selected="false" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg><span>Data</span></button>
+</nav>
+</div>
+</body></html>

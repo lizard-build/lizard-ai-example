@@ -1,0 +1,18 @@
+{
+  "services": {
+    "bot": {
+      "sourceType": "github",
+      "repoUrl": "https://github.com/lizard-build/lizard-ai",
+      "branch": "main",
+      "rootDirectory": "",
+      "containerPort": 3000
+    },
+    "worker": {
+      "sourceType": "github",
+      "repoUrl": "https://github.com/lizard-build/lizard-ai",
+      "branch": "main",
+      "rootDirectory": "",
+      "containerPort": 0
+    }
+  }
+}

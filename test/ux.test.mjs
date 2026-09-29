@@ -1,0 +1,121 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { Telegram } from '../src/telegram.mjs';
+import { Store } from '../src/store.mjs';
+import { Bot } from '../src/bot.mjs';
+import { privateUser } from '../src/core.mjs';
+
+const recorder = (reply=()=>({ok:true,result:{message_id:4}})) => {
+  const calls=[];
+  const tg=new Telegram('TEST_SECRET',async(url,options)=>{
+    const method=url.split('/').at(-1), body=JSON.parse(options.body); calls.push({method,body});
+    return {json:async()=>reply(method,body)};
+  });
+  return {calls,tg};
+};
+test('rich messages preserve Telegram Markdown, topic and copy buttons',async()=>{
+  const {tg,calls}=recorder();
+  const text='## Result\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- [x] Done\n\n```js\nconst x = 1;\n```';
+  await tg.send(123,55,text,{rich:true});
+  assert.equal(calls[0].method,'sendRichMessage');
+  assert.equal(calls[0].body.rich_message.markdown,text);
+  assert.equal(calls[0].body.message_thread_id,55);
+  await tg.send(123,55,'Enter **AB12-CD34** at https://github.com/login/device',{rich:true});
+  assert.equal(calls[1].body.reply_markup.inline_keyboard[0][0].copy_text.text,'AB12-CD34');
+});
+test('rich fallback only follows a definite API rejection',async()=>{
+  const {tg,calls}=recorder(method=>method==='sendRichMessage' ? {ok:false,error_code:400} : {ok:true,result:{message_id:4}});
+  await tg.send(123,55,'**Result**',{rich:true});
+  assert.deepEqual(calls.map(c=>c.method),['sendRichMessage','sendMessage']);
+  assert.equal(calls[1].body.text,'Result');
+  let count=0;
+  const uncertain=new Telegram('SECRET',async()=>{count++;throw new Error('SECRET');});
+  await assert.rejects(uncertain.send(123,55,'Reply',{rich:true}),e=>!e.message.includes('SECRET'));
+  assert.equal(count,1);
+});
+test('rich buttons have a usable keyboard fallback and drafts keep a stable ID',async()=>{
+  const {tg,calls}=recorder(method=>method==='sendRichMessage' ? {ok:false,error_code:400} : {ok:true,result:true});
+  const buttons=[[{text:'Yes',callback_data:'answer'}]];
+  await tg.send(123,55,'Choose Yes',{rich_message:{blocks:[{type:'buttons',buttons:buttons[0]}]},fallback_markup:{inline_keyboard:buttons}});
+  assert.equal(calls[0].body.fallback_markup,undefined);
+  assert.deepEqual(calls[1].body.reply_markup.inline_keyboard,buttons);
+  await tg.draft(123,55,17,'**Par'); await tg.draft(123,55,17,'**Partial** reply'); await tg.typing(123,55);
+  assert.deepEqual(calls.slice(2,4).map(c=>c.body.draft_id),[17,17]);
+  assert.ok(calls[2].body.can_stop);
+  assert.equal(calls.at(-1).body.action,'typing');
+  assert.ok(calls.slice(2).every(c=>c.body.message_thread_id===55));
+});
+test('draft rate limits return immediately instead of blocking task handling',async()=>{
+  const {tg,calls}=recorder(()=>({ok:false,error_code:429,parameters:{retry_after:20}}));
+  await assert.rejects(tg.draft(123,55,17,'Reply'),e=>e.retryAfter===20);
+  assert.equal(calls.length,1);
+});
+test('native stop updates only identify a valid private user',()=>{
+  assert.equal(privateUser({stopped_message_generation:{chat:{id:123,type:'private'},draft_id:1}}),123);
+  assert.equal(privateUser({stopped_message_generation:{chat:{id:-1,type:'supergroup'},draft_id:1}}),null);
+});
+
+test('clarification buttons, custom answers, streaming and stop stay scoped and survive recovery',{skip:!process.env.TEST_DATABASE_URL},async t=>{
+  const store=new Store(process.env.TEST_DATABASE_URL,'tenant_990099');await store.start();t.after(()=>store.close());
+  await store.query("INSERT INTO sessions(topic,title,cwd,thread_id,turn_id) VALUES(55,'One','/workspace/sessions/55','t-1','turn-1'),(66,'Two','/workspace/sessions/66','t-2','turn-2')");
+  const {tg,calls}=recorder(); const replies=[],rpcs=[];
+  const runtime={generation:'g',reply:async(...a)=>replies.push(a),rpc:async(...a)=>{rpcs.push(a);return {};}};
+  let bot=new Bot({owner:123,chat:123},store,tg,runtime);
+  const questions=[{id:'color',question:'Which color?',options:[{label:'Blue',description:'Recommended'},{label:'Red',description:'Alternative'}]},{id:'name',question:'What name?',options:[]}];
+  await bot.event({seq:1,generation:'g',data:{id:50,method:'item/tool/requestUserInput',params:{threadId:'t-1',turnId:'turn-1',questions}}});
+  const a=(await store.query('SELECT * FROM approvals')).rows[0];
+  const card=(await store.query('SELECT * FROM outbox')).rows[0];
+  assert.equal(card.extra.rich_message.blocks.at(-1).type,'buttons');
+  assert.deepEqual(card.extra.rich_message.blocks[0],{type:'heading',size:3,text:'Question 1 of 2'});
+  const data=`question:${a.id}:0:0`;
+  assert.ok(Buffer.byteLength(data)<=64);
+  const callback=(user,topic,data)=>({callback_query:{id:`click-${calls.length}`,from:{id:user},message:{chat:{id:123},message_thread_id:topic,message_id:10},data}});
+  await bot.handle(callback(999,55,data)); await bot.handle(callback(123,66,data));
+  assert.deepEqual((await store.query('SELECT answers FROM approvals')).rows[0].answers,{});
+  await bot.handle(callback(123,55,data)); await bot.handle(callback(123,55,data));
+  assert.equal(replies.length,0);
+  assert.equal((await store.query('SELECT count(*) FROM outbox')).rows[0].count,'2');
+  bot=new Bot({owner:123,chat:123},store,tg,runtime);
+  await bot.handle({update_id:999,message:{from:{id:123},chat:{id:123},message_thread_id:55,text:'My project'}});
+  assert.equal(replies.length,1);
+  assert.deepEqual(replies[0][1],{answers:{color:{answers:['Blue']},name:{answers:['My project']}}});
+  await bot.handle(callback(123,55,data));assert.equal(replies.length,1);
+  assert.equal((await store.query('SELECT state FROM approvals')).rows[0].state,'answered');
+  // Dynamic tool calls use their own response schema, with the same question UI.
+  await bot.event({seq:2,generation:'g',data:{id:51,method:'item/tool/call',params:{threadId:'t-2',turnId:'turn-2',tool:'telegram_ask_user',arguments:{questions:[questions[1]]}}}});
+  await bot.handle({update_id:1000,message:{from:{id:123},chat:{id:123},message_thread_id:66,text:'Second project'}});
+  assert.equal(replies[1][1].success,true);assert.equal(replies[1][1].contentItems[0].type,'inputText');
+  await bot.event({seq:20,generation:'g',data:{id:52,method:'item/tool/requestUserInput',params:{threadId:'t-2',turnId:'turn-2',questions:[questions[1]]}}});
+  const goodReply=runtime.reply, attempted=[];
+  runtime.reply=async(...args)=>{attempted.push(args);if(attempted.length===1)throw new Error('Reply delivery unknown');return goodReply(...args);};
+  const answer={update_id:1001,message:{from:{id:123},chat:{id:123},message_thread_id:66,text:'Saved answer'}};
+  await assert.rejects(bot.handle(answer),/unknown/);
+  await bot.handle({...answer,update_id:1002,message:{...answer.message,text:'Retry'}});
+  assert.equal(attempted[0][2],attempted[1][2],'retry must reuse the bridge deduplication key');
+  assert.deepEqual(attempted[1][1].answers.name.answers,['Saved answer']);
+  runtime.reply=goodReply;
+  const snapshot={generation:'g',threadId:'t-1',turnId:'turn-1',itemId:'item-1',text:'Partial '};
+  await bot.stream(snapshot);await bot.stream({...snapshot,text:'Partial response'});
+  const preview=async()=>(await store.query("SELECT * FROM outbox WHERE dedup_key='stream:g:item-1'")).rows[0];
+  const firstPreview=await preview();
+  assert.equal(firstPreview.revision,1,'unfinished words do not cause edits');
+  const draft=(await store.query('SELECT * FROM message_streams')).rows[0];
+  bot.drafts.get(draft.draft_id).next=0;
+  await bot.stream({...snapshot,text:'Partial response '});
+  assert.equal((await preview()).id,firstPreview.id,'all words update the same message');
+  assert.equal((await preview()).text,'Partial response ');
+  assert.equal(calls.filter(c=>c.method==='sendRichMessageDraft').length,0);
+  await bot.handle({stopped_message_generation:{chat:{id:999,type:'private'},message_thread_id:55,draft_id:draft.draft_id}});
+  await bot.handle({stopped_message_generation:{chat:{id:123,type:'private'},message_thread_id:66,draft_id:draft.draft_id}});
+  assert.equal(rpcs.length,0);
+  await bot.handle(callback(123,55,`progress-stop:${draft.draft_id}`));
+  assert.equal(rpcs[0][0],'turn/interrupt');
+  const stoppedRevision=(await preview()).revision;
+  await bot.stream(snapshot);assert.equal((await preview()).revision,stoppedRevision);
+  await bot.event({seq:3,generation:'g',data:{method:'item/completed',params:{threadId:'t-1',item:{id:'item-1',type:'agentMessage',text:'**Final**'}}}});
+  await bot.event({seq:3,generation:'g',data:{method:'item/completed',params:{threadId:'t-1',item:{id:'item-1',type:'agentMessage',text:'**Final**'}}}});
+  const final=await preview();
+  assert.equal(final.id,firstPreview.id);assert.equal(final.text,'**Final**');assert.equal(final.extra.rich,true);
+  assert.equal(final.extra.streamPreview,undefined);
+  assert.equal((await store.query("SELECT 1 FROM outbox WHERE dedup_key='event:3'")).rowCount,0);
+});

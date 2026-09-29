@@ -1,0 +1,21 @@
+{
+  "name": "personal-codex-telegram",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/main.mjs && node --check src/bot.mjs && node --check src/bridge.mjs && node --check src/runtime.mjs && node --check src/control.mjs && node --check src/worker.mjs && node --check src/store.mjs && node --check src/attachments.mjs && node --check src/artifacts.mjs && node --check src/streaming.mjs && node --check src/save-attachment.mjs && node --check src/core.mjs && node --check src/telegram.mjs && node --check src/format.mjs && node --check src/apps.mjs && node --check src/collect-apps.mjs && node --check src/settings.mjs && node --check src/miniapp.mjs && node --check web/app.js && node --check src/questions.mjs && node --check src/install-lizard-skill.mjs && node --check src/setup-tools.mjs && node --check src/persistent-gh.mjs && node --check src/warm-start.mjs && node --check src/lizard-accounts.mjs && node --check src/managed-lizard.mjs && node --check src/volume-transfer.mjs && node --check scripts/migrate-tenant.mjs && sh -n src/setup-browser.sh && node --check src/groups.mjs && node --check src/transcription.mjs"
+  },
+  "dependencies": {
+    "@lizard-build/sdk": "0.1.38",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.1"
+  }
+}
